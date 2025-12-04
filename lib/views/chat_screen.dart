@@ -18,8 +18,9 @@ class ChatScreen extends StatefulWidget {
   State<ChatScreen> createState() => _ChatScreenState();
 }
 
-class _ChatScreenState extends State<ChatScreen>
-    with SingleTickerProviderStateMixin {
+// CHANGE: Use TickerProviderStateMixin instead of SingleTickerProviderStateMixin
+class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
+  // <-- CHANGED HERE
   // Text controller
   final TextEditingController _textController = TextEditingController();
 
@@ -38,6 +39,8 @@ class _ChatScreenState extends State<ChatScreen>
   double _currentAmplitude = 0.0;
   List<double> _waveHeights = List.generate(7, (_) => 0.0);
   late AnimationController _pulseAnimationController;
+  late AnimationController
+  _holdAnimationController; // <-- SECOND ANIMATION CONTROLLER
 
   // Lottie animations
   static const String _waveAnimationPath = 'assets/voice1.json';
@@ -46,18 +49,28 @@ class _ChatScreenState extends State<ChatScreen>
   Timer? _simulationTimer;
   final Random _random = Random();
 
-  // Flag to track if we should auto-send after recording stops
-  bool _shouldAutoSend = false;
+  // Hold & Speak variables
+  bool _isButtonPressed = false;
+  Timer? _holdTimer;
+  final Duration _holdThreshold = const Duration(milliseconds: 300);
+  Duration _recordingDuration = Duration.zero;
+  Timer? _recordingTimer;
 
   @override
   void initState() {
     super.initState();
 
-    // Initialize pulse animation
+    // Initialize pulse animation for recording state
     _pulseAnimationController = AnimationController(
-      vsync: this,
+      vsync: this, // <-- Now works with TickerProviderStateMixin
       duration: const Duration(milliseconds: 800),
-    )..repeat(reverse: true);
+    );
+
+    // Initialize hold animation for button press feedback
+    _holdAnimationController = AnimationController(
+      vsync: this, // <-- Now works with TickerProviderStateMixin
+      duration: const Duration(milliseconds: 300),
+    );
 
     // Initialize text controller listener
     _textController.addListener(() {
@@ -79,7 +92,6 @@ class _ChatScreenState extends State<ChatScreen>
             setState(() {
               _lastStatus = status;
               if (status == 'done' && _isRecording) {
-                // Recording finished, stop it
                 _stopRecording();
               }
             });
@@ -88,6 +100,7 @@ class _ChatScreenState extends State<ChatScreen>
             setState(() {
               _lastError = error.errorMsg;
               _isRecording = false;
+              _isButtonPressed = false;
             });
           },
         );
@@ -157,16 +170,22 @@ class _ChatScreenState extends State<ChatScreen>
         _isListening = true;
         _lastWords = '';
         _lastError = '';
-        _shouldAutoSend = false; // Reset auto-send flag
       });
+
+      // Start pulse animation
+      _pulseAnimationController.repeat(reverse: true);
 
       // Start wave animation
       _startWaveAnimation();
+
+      // Start recording duration timer
+      _startRecordingTimer();
 
       print("Started recording...");
     } catch (e) {
       setState(() {
         _isRecording = false;
+        _isButtonPressed = false;
         _lastError = e.toString();
       });
       print("Error starting recording: $e");
@@ -238,6 +257,19 @@ class _ChatScreenState extends State<ChatScreen>
     }
   }
 
+  void _startRecordingTimer() {
+    _recordingDuration = Duration.zero;
+    _recordingTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (_isRecording && mounted) {
+        setState(() {
+          _recordingDuration += const Duration(seconds: 1);
+        });
+      } else {
+        timer.cancel();
+      }
+    });
+  }
+
   void _stopWaveAnimation() {
     _simulationTimer?.cancel();
     _simulationTimer = null;
@@ -249,6 +281,7 @@ class _ChatScreenState extends State<ChatScreen>
       setState(() {
         _isRecording = false;
         _isListening = false;
+        _isButtonPressed = false;
         _currentAmplitude = 0.0;
       });
 
@@ -257,15 +290,57 @@ class _ChatScreenState extends State<ChatScreen>
 
       // Stop animations
       _stopWaveAnimation();
+      _pulseAnimationController.stop();
+      _holdAnimationController.reverse();
 
-      print("Stopped recording");
+      // Stop recording timer
+      _recordingTimer?.cancel();
+      _recordingTimer = null;
 
-      // DO NOT auto-send here anymore
-      // The text is already in the text field
-      // User can manually send by pressing send button
+      print("Stopped recording after ${_recordingDuration.inSeconds} seconds");
     } catch (e) {
       print("Error stopping recording: $e");
     }
+  }
+
+  // Handle button press (start holding)
+  void _onButtonPressed() {
+    setState(() {
+      _isButtonPressed = true;
+    });
+
+    // Start hold animation
+    _holdAnimationController.forward();
+
+    // Start hold timer
+    _holdTimer = Timer(_holdThreshold, () {
+      if (_isButtonPressed && !_isRecording) {
+        _startRecording();
+      }
+    });
+  }
+
+  // Handle button release (stop holding)
+  void _onButtonReleased() {
+    // Cancel hold timer if it's still running
+    _holdTimer?.cancel();
+
+    // Reverse hold animation
+    _holdAnimationController.reverse();
+
+    setState(() {
+      _isButtonPressed = false;
+    });
+
+    // If recording is active, stop it
+    if (_isRecording) {
+      _stopRecording();
+    }
+  }
+
+  // Handle button cancel (when finger leaves button area)
+  void _onButtonCancel() {
+    _onButtonReleased();
   }
 
   void _sendMessage() {
@@ -279,19 +354,14 @@ class _ChatScreenState extends State<ChatScreen>
     }
   }
 
-  void _toggleRecording() {
-    if (_isRecording) {
-      _stopRecording();
-    } else {
-      _startRecording();
-    }
-  }
-
   @override
   void dispose() {
     _textController.dispose();
     _pulseAnimationController.dispose();
+    _holdAnimationController.dispose();
     _stopWaveAnimation();
+    _holdTimer?.cancel();
+    _recordingTimer?.cancel();
     _speech.cancel();
     super.dispose();
   }
@@ -321,15 +391,6 @@ class _ChatScreenState extends State<ChatScreen>
                   if (state is ChatLoaded) messages = state.messages;
                   if (state is ChatLoading) messages = state.messages;
                   if (state is ChatError) messages = state.messages;
-                  // ADD Empty state handling
-                  if (messages.isEmpty) {
-                    return Center(
-                      child: Text(
-                        "Start a conversation...",
-                        style: TextStyle(color: Colors.grey[600], fontSize: 16),
-                      ),
-                    );
-                  }
 
                   return ListView.builder(
                     padding: const EdgeInsets.all(16),
@@ -407,28 +468,46 @@ class _ChatScreenState extends State<ChatScreen>
           // Visualizer
           Expanded(child: Center(child: _buildVisualizer())),
 
-          // Action Buttons
-          Row(
+          // Recording timer and stop button
+          Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
+              // Recording timer
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: Colors.red.withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Text(
+                  _formatDuration(_recordingDuration),
+                  style: TextStyle(
+                    color: Colors.red[700],
+                    fontSize: 14,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+
+              // Stop button
               IconButton(
                 onPressed: _stopRecording,
-                icon: Icon(Icons.close),
+                icon: const Icon(Icons.stop, color: Colors.red),
                 tooltip: 'Stop Recording',
               ),
-              if (_lastWords.isNotEmpty) ...[
-                const SizedBox(width: 8),
-                IconButton(
-                  onPressed: _sendMessage,
-                  icon: Icon(Icons.send),
-                  tooltip: 'Send Message',
-                ),
-              ],
             ],
           ),
         ],
       ),
     );
+  }
+
+  String _formatDuration(Duration duration) {
+    String twoDigits(int n) => n.toString().padLeft(2, "0");
+    String minutes = twoDigits(duration.inMinutes.remainder(60));
+    String seconds = twoDigits(duration.inSeconds.remainder(60));
+    return "$minutes:$seconds";
   }
 
   Widget _buildVisualizer() {
@@ -437,6 +516,17 @@ class _ChatScreenState extends State<ChatScreen>
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
+          // Recording status
+          Text(
+            _isRecording ? "Recording... Speak now" : "Hold to speak",
+            style: TextStyle(
+              color: Colors.red[700],
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 8),
+
           // Custom Wave Animation
           _buildCustomWaveAnimation(),
         ],
@@ -466,14 +556,14 @@ class _ChatScreenState extends State<ChatScreen>
                 right: index == _waveHeights.length - 1 ? 0 : 4,
               ),
               decoration: BoxDecoration(
-                color: Colors.black.withOpacity(0.8),
+                color: Colors.red.withOpacity(0.8),
                 borderRadius: BorderRadius.circular(4),
                 gradient: LinearGradient(
                   begin: Alignment.topCenter,
                   end: Alignment.bottomCenter,
                   colors: [
-                    Colors.black.withOpacity(0.9),
-                    Colors.black.withOpacity(0.6),
+                    Colors.red.withOpacity(0.9),
+                    Colors.orange.withOpacity(0.7),
                   ],
                 ),
               ),
@@ -539,14 +629,14 @@ class _ChatScreenState extends State<ChatScreen>
 
           const SizedBox(width: 12),
 
-          // Send/Mic Button
+          // Send/Hold & Speak Button
           AnimatedSwitcher(
             duration: const Duration(milliseconds: 300),
             transitionBuilder: (child, animation) {
               return ScaleTransition(scale: animation, child: child);
             },
             child: _textController.text.trim().isEmpty || _isRecording
-                ? _buildVoiceButton()
+                ? _buildHoldToSpeakButton()
                 : _buildSendButton(),
           ),
         ],
@@ -554,67 +644,112 @@ class _ChatScreenState extends State<ChatScreen>
     );
   }
 
-  Widget _buildVoiceButton() {
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 300),
-      width: _isRecording ? 52 : 50,
-      height: _isRecording ? 52 : 50,
-      decoration: BoxDecoration(
-        gradient: _isRecording
-            ? RadialGradient(
-                center: Alignment.center,
-                radius: 0.8,
-                colors: [Colors.red[500]!, Colors.red[700]!],
-              )
-            : LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                colors: [Colors.blue[500]!, Colors.blue[700]!],
+  Widget _buildHoldToSpeakButton() {
+    return AnimatedBuilder(
+      animation: Listenable.merge([
+        _holdAnimationController,
+        _pulseAnimationController,
+      ]),
+      builder: (context, child) {
+        // Calculate scale based on hold animation
+        double scale = 1.0;
+        if (_isButtonPressed) {
+          scale = 1.0 + _holdAnimationController.value * 0.3;
+        } else if (_isRecording) {
+          scale = 1.0 + _pulseAnimationController.value * 0.2;
+        }
+
+        // Calculate color based on state
+        Color backgroundColor;
+        if (_isRecording) {
+          backgroundColor = Colors.red;
+        } else if (_isButtonPressed) {
+          // Gradient from blue to red while holding
+          backgroundColor = Color.lerp(
+            Colors.blue[500],
+            Colors.red[500],
+            _holdAnimationController.value,
+          )!;
+        } else {
+          backgroundColor = Colors.blue[500]!;
+        }
+
+        return Transform.scale(
+          scale: scale,
+          child: GestureDetector(
+            onTapDown: (_) => _onButtonPressed(),
+            onTapUp: (_) => _onButtonReleased(),
+            onTapCancel: _onButtonCancel,
+            onLongPress: _isRecording ? null : _startRecording,
+            child: Container(
+              width: 60,
+              height: 60,
+              decoration: BoxDecoration(
+                color: backgroundColor,
+                shape: BoxShape.circle,
+                boxShadow: [
+                  BoxShadow(
+                    color: backgroundColor.withOpacity(0.4),
+                    blurRadius: _isRecording ? 15 : 8,
+                    spreadRadius: _isRecording ? 2 : 0,
+                    offset: const Offset(0, 4),
+                  ),
+                ],
               ),
-        shape: BoxShape.circle,
-        boxShadow: [
-          if (_isRecording)
-            BoxShadow(
-              color: Colors.red.withOpacity(0.4),
-              blurRadius: 15,
-              spreadRadius: 2,
-            )
-          else
-            BoxShadow(
-              color: Colors.blue.withOpacity(0.3),
-              blurRadius: 8,
-              offset: const Offset(0, 4),
-            ),
-        ],
-      ),
-      child: IconButton(
-        icon: _isRecording
-            ? Stack(
+              child: Stack(
                 alignment: Alignment.center,
                 children: [
-                  // Pulsing effect
-                  AnimatedBuilder(
-                    animation: _pulseAnimationController,
-                    builder: (context, child) {
-                      return Transform.scale(
-                        scale: 1.0 + _pulseAnimationController.value * 0.3,
-                        child: Container(
-                          width: 40,
-                          height: 40,
+                  // Hold progress indicator (only when holding, not recording)
+                  if (_isButtonPressed && !_isRecording)
+                    CircularProgressIndicator(
+                      value: _holdAnimationController.value,
+                      strokeWidth: 3,
+                      valueColor: const AlwaysStoppedAnimation(Colors.white),
+                      backgroundColor: Colors.white.withOpacity(0.3),
+                    ),
+
+                  // Pulsing effect when recording
+                  if (_isRecording)
+                    AnimatedBuilder(
+                      animation: _pulseAnimationController,
+                      builder: (context, child) {
+                        return Container(
+                          width: 48,
+                          height: 48,
                           decoration: BoxDecoration(
                             color: Colors.white.withOpacity(0.2),
                             shape: BoxShape.circle,
                           ),
-                        ),
-                      );
-                    },
+                        );
+                      },
+                    ),
+
+                  // Icon
+                  Icon(
+                    _isRecording ? Icons.mic : Icons.mic_none,
+                    color: Colors.white,
+                    size: 28,
                   ),
-                  const Icon(Icons.mic, color: Colors.white, size: 24),
+
+                  // Hold instruction (only when not recording)
+                  // if (!_isRecording && !_isButtonPressed)
+                  //   Positioned(
+                  //     bottom: 2,
+                  //     child: Text(
+                  //       "Hold",
+                  //       style: TextStyle(
+                  //         color: Colors.white.withOpacity(0.8),
+                  //         fontSize: 10,
+                  //         fontWeight: FontWeight.bold,
+                  //       ),
+                  //     ),
+                  //   ),
                 ],
-              )
-            : const Icon(Icons.mic, color: Colors.white, size: 24),
-        onPressed: _toggleRecording,
-      ),
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 
