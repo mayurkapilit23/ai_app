@@ -8,7 +8,7 @@ class GeminiRepository {
 
   Future<String> sendMessage(String prompt) async {
     final url = Uri.parse(
-      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=$apiKey",
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=$apiKey",
     );
 
     try {

@@ -20,7 +20,6 @@ class ChatScreen extends StatefulWidget {
 
 // CHANGE: Use TickerProviderStateMixin instead of SingleTickerProviderStateMixin
 class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
-  // <-- CHANGED HERE
   // Text controller
   final TextEditingController _textController = TextEditingController();
 
@@ -42,9 +41,6 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
   late AnimationController
   _holdAnimationController; // <-- SECOND ANIMATION CONTROLLER
 
-  // Lottie animations
-  static const String _waveAnimationPath = 'assets/voice1.json';
-
   // Timer for simulated amplitude (fallback)
   Timer? _simulationTimer;
   final Random _random = Random();
@@ -55,6 +51,10 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
   final Duration _holdThreshold = const Duration(milliseconds: 300);
   Duration _recordingDuration = Duration.zero;
   Timer? _recordingTimer;
+
+  // Drag/cancel tracking
+  double _dragOffsetY = 0.0; // cumulative drag in vertical direction
+  final double _cancelThreshold = 80.0; // pixels upward to cancel
 
   @override
   void initState() {
@@ -155,6 +155,10 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
             // Update the recognized text in the text field
             _lastWords = result.recognizedWords;
             _textController.text = _lastWords;
+            // move caret to end
+            _textController.selection = TextSelection.collapsed(
+              offset: _textController.text.length,
+            );
           });
         },
         listenFor: const Duration(minutes: 5),
@@ -170,6 +174,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
         _isListening = true;
         _lastWords = '';
         _lastError = '';
+        _dragOffsetY = 0.0;
       });
 
       // Start pulse animation
@@ -291,6 +296,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
       // Stop animations
       _stopWaveAnimation();
       _pulseAnimationController.stop();
+      _pulseAnimationController.reset();
       _holdAnimationController.reverse();
 
       // Stop recording timer
@@ -303,11 +309,51 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     }
   }
 
+  // Cancel recording (user slid up)
+  void _cancelRecording() {
+    _holdTimer?.cancel();
+    _stopWaveAnimation();
+    try {
+      _speech.cancel();
+    } catch (_) {}
+
+    _pulseAnimationController.stop();
+    _pulseAnimationController.reset();
+
+    _recordingTimer?.cancel();
+    _recordingTimer = null;
+
+    setState(() {
+      _isRecording = false;
+      _isButtonPressed = false;
+      _isListening = false;
+      _currentAmplitude = 0.0;
+      _lastWords = '';
+      _textController.clear();
+      _waveHeights = List.generate(7, (_) => 0.0);
+    });
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).removeCurrentSnackBar();
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("Recording cancelled"),
+          duration: Duration(seconds: 1),
+        ),
+      );
+    }
+
+    print("Recording cancelled by slide-up.");
+  }
+
   // Handle button press (start holding)
   void _onButtonPressed() {
     setState(() {
       _isButtonPressed = true;
     });
+
+    // Reset drag tracking
+    _dragOffsetY = 0.0;
 
     // Start hold animation
     _holdAnimationController.forward();
@@ -327,6 +373,9 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
 
     // Reverse hold animation
     _holdAnimationController.reverse();
+
+    // Reset drag tracking
+    _dragOffsetY = 0.0;
 
     setState(() {
       _isButtonPressed = false;
@@ -362,7 +411,9 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     _stopWaveAnimation();
     _holdTimer?.cancel();
     _recordingTimer?.cancel();
-    _speech.cancel();
+    try {
+      _speech.cancel();
+    } catch (_) {}
     super.dispose();
   }
 
@@ -466,7 +517,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
       child: Row(
         children: [
           // Visualizer
-          Expanded(child: Center(child: _buildVisualizer())),
+          Expanded(flex: 2, child: Center(child: _buildVisualizer())),
 
           // Recording timer and stop button
           Column(
@@ -479,13 +530,28 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
                   color: Colors.red.withOpacity(0.1),
                   borderRadius: BorderRadius.circular(20),
                 ),
-                child: Text(
-                  _formatDuration(_recordingDuration),
-                  style: TextStyle(
-                    color: Colors.red[700],
-                    fontSize: 14,
-                    fontWeight: FontWeight.bold,
-                  ),
+                child: Column(
+                  children: [
+                    // Slide to cancel hint
+                    Text(
+                      "Slide up to cancel",
+                      style: TextStyle(
+                        color: Colors.grey[700],
+                        fontSize: 13,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+
+                    Text(
+                      _formatDuration(_recordingDuration),
+                      style: TextStyle(
+                        color: Colors.red[700],
+                        fontSize: 14,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
                 ),
               ),
               const SizedBox(height: 8),
@@ -677,9 +743,29 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
         return Transform.scale(
           scale: scale,
           child: GestureDetector(
+            // Core press/release behaviors
             onTapDown: (_) => _onButtonPressed(),
             onTapUp: (_) => _onButtonReleased(),
             onTapCancel: _onButtonCancel,
+            // Also support pan gestures to detect upward slide (cancel)
+            onPanStart: (_) {
+              // reset cumulative drag
+              _dragOffsetY = 0.0;
+            },
+            onPanUpdate: (details) {
+              if (_isRecording || _isButtonPressed) {
+                // accumulate vertical drag (positive is down, negative is up)
+                _dragOffsetY += details.delta.dy;
+                // If cumulative upward drag beyond threshold, cancel
+                if (_dragOffsetY <= -_cancelThreshold) {
+                  _cancelRecording();
+                }
+              }
+            },
+            onPanEnd: (_) {
+              // If user pans but didn't cross threshold, do nothing special;
+              // releasing the finger will trigger onTapUp -> _onButtonReleased which will stop recording if active.
+            },
             onLongPress: _isRecording ? null : _startRecording,
             child: Container(
               width: 60,
@@ -730,20 +816,6 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
                     color: Colors.white,
                     size: 28,
                   ),
-
-                  // Hold instruction (only when not recording)
-                  // if (!_isRecording && !_isButtonPressed)
-                  //   Positioned(
-                  //     bottom: 2,
-                  //     child: Text(
-                  //       "Hold",
-                  //       style: TextStyle(
-                  //         color: Colors.white.withOpacity(0.8),
-                  //         fontSize: 10,
-                  //         fontWeight: FontWeight.bold,
-                  //       ),
-                  //     ),
-                  //   ),
                 ],
               ),
             ),
