@@ -81,6 +81,30 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     _initSpeech();
   }
 
+  Future<void> _restartListening() async {
+    try {
+      await _speech.listen(
+        onResult: (result) {
+          setState(() {
+            _lastWords = result.recognizedWords;
+            _textController.text = _lastWords;
+            _textController.selection = TextSelection.collapsed(
+              offset: _textController.text.length,
+            );
+          });
+        },
+        partialResults: true,
+        listenFor: const Duration(minutes: 5),
+        pauseFor: const Duration(minutes: 5),
+        onSoundLevelChange: _handleSoundLevelChange,
+        cancelOnError: true,
+        listenMode: stt.ListenMode.dictation,
+      );
+    } catch (e) {
+      print("Restart listen failed: $e");
+    }
+  }
+
   Future<void> _initSpeech() async {
     try {
       // Check and request microphone permission
@@ -88,14 +112,23 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
 
       if (status.isGranted) {
         _speechAvailable = await _speech.initialize(
-          onStatus: (status) {
-            setState(() {
-              _lastStatus = status;
-              if (status == 'done' && _isRecording) {
-                _stopRecording();
+          onStatus: (status) async {
+            _lastStatus = status;
+
+            if (_isRecording) {
+              if (status == "done" || status == "notListening") {
+                // Speech engine auto-stopped → restart listen
+                await Future.delayed(const Duration(milliseconds: 50));
+                if (_isRecording) _restartListening();
               }
+            }
+            setState(() {
+              // if (status == 'done' && _isRecording) {
+              //   _stopRecording();
+              // }
             });
           },
+
           onError: (error) {
             setState(() {
               _lastError = error.errorMsg;
@@ -162,11 +195,11 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
           });
         },
         listenFor: const Duration(minutes: 5),
-        pauseFor: const Duration(seconds: 10),
+        pauseFor: const Duration(minutes: 5),
         onSoundLevelChange: _handleSoundLevelChange,
         cancelOnError: true,
         partialResults: true,
-        listenMode: stt.ListenMode.confirmation,
+        listenMode: stt.ListenMode.dictation,
       );
 
       setState(() {
@@ -417,6 +450,8 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     super.dispose();
   }
 
+  List<ChatMessage> messages = [];
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -437,7 +472,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
             Expanded(
               child: BlocBuilder<ChatBloc, ChatState>(
                 builder: (context, state) {
-                  List<ChatMessage> messages = [];
+                  // List<ChatMessage> messages = [];
 
                   if (state is ChatLoaded) messages = state.messages;
                   if (state is ChatLoading) messages = state.messages;
@@ -521,40 +556,40 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
 
           // Recording timer and stop button
           Column(
-            mainAxisAlignment: MainAxisAlignment.center,
+            // mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              // Recording timer
-              Container(
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: Colors.red.withOpacity(0.1),
-                  borderRadius: BorderRadius.circular(20),
-                ),
-                child: Column(
-                  children: [
-                    // Slide to cancel hint
-                    Text(
-                      "Slide up to cancel",
-                      style: TextStyle(
-                        color: Colors.grey[700],
-                        fontSize: 13,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                    const SizedBox(height: 6),
-
-                    Text(
-                      _formatDuration(_recordingDuration),
-                      style: TextStyle(
-                        color: Colors.red[700],
-                        fontSize: 14,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 8),
+              // // Recording timer
+              // Container(
+              //   padding: const EdgeInsets.all(8),
+              //   decoration: BoxDecoration(
+              //     color: Colors.red.withOpacity(0.1),
+              //     borderRadius: BorderRadius.circular(20),
+              //   ),
+              //   child: Column(
+              //     children: [
+              //       // Slide to cancel hint
+              //       Text(
+              //         "Slide up to cancel",
+              //         style: TextStyle(
+              //           color: Colors.grey[700],
+              //           fontSize: 10,
+              //           fontWeight: FontWeight.w500,
+              //         ),
+              //       ),
+              //       const SizedBox(height: 6),
+              //
+              //       Text(
+              //         _formatDuration(_recordingDuration),
+              //         style: TextStyle(
+              //           color: Colors.red[700],
+              //           fontSize: 14,
+              //           fontWeight: FontWeight.bold,
+              //         ),
+              //       ),
+              //     ],
+              //   ),
+              // ),
+              // const SizedBox(height: 8),
 
               // Stop button
               IconButton(
@@ -766,10 +801,10 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
               // If user pans but didn't cross threshold, do nothing special;
               // releasing the finger will trigger onTapUp -> _onButtonReleased which will stop recording if active.
             },
-            onLongPress: _isRecording ? null : _startRecording,
+            // onLongPress: _isRecording ? null : _startRecording,
             child: Container(
-              width: 60,
-              height: 60,
+              width: 50,
+              height: 50,
               decoration: BoxDecoration(
                 color: backgroundColor,
                 shape: BoxShape.circle,
@@ -814,7 +849,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
                   Icon(
                     _isRecording ? Icons.mic : Icons.mic_none,
                     color: Colors.white,
-                    size: 28,
+                    size: 24,
                   ),
                 ],
               ),
